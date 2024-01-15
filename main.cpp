@@ -8,9 +8,11 @@
 #include <curl/curl.h>
 #include <iostream>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
 
+using json = nlohmann::json;
 namespace beast = boost::beast;         // from <boost/beast.hpp>
 namespace http = beast::http;           // from <boost/beast/http.hpp>
 namespace websocket = beast::websocket; // from <boost/beast/websocket.hpp>
@@ -30,13 +32,13 @@ class session : public std::enable_shared_from_this<session>
     // Start the asynchronous operation
     void run()
     {
-        // Set the CORS headers
-        ws_.set_option(websocket::stream_base::decorator([](websocket::response_type &res) {
-            res.set(http::field::access_control_allow_origin, "*");
-            res.set(http::field::access_control_allow_credentials, "true");
-            res.set(http::field::access_control_allow_methods, "GET, POST, OPTIONS");
-            res.set(http::field::access_control_allow_headers, "Content-Type, Authorization");
-        }));
+        // // Set the CORS headers
+        // ws_.set_option(websocket::stream_base::decorator([](websocket::response_type &res) {
+        //     res.set(http::field::access_control_allow_origin, "*");
+        //     res.set(http::field::access_control_allow_credentials, "true");
+        //     res.set(http::field::access_control_allow_methods, "GET, POST, OPTIONS");
+        //     res.set(http::field::access_control_allow_headers, "Content-Type, Authorization");
+        // }));
 
         // Perform the WebSocket handshake
         ws_.async_accept(beast::bind_front_handler(&session::on_accept, shared_from_this()));
@@ -60,14 +62,57 @@ class session : public std::enable_shared_from_this<session>
     void on_read(beast::error_code ec, std::size_t bytes_transferred)
     {
         boost::ignore_unused(bytes_transferred);
-
-        // Handle the error, if any
         if (ec)
-            return session::fail(ec, "read");
+            return fail(ec, "read");
 
-        // Echo the message back
-        ws_.text(ws_.got_text());
-        ws_.async_write(buffer_.data(), beast::bind_front_handler(&session::on_write, shared_from_this()));
+        // Parse the message as JSON
+        try
+        {
+            std::cout << "Received message: " << beast::buffers_to_string(buffer_.data()) << std::endl;
+            json j = json::parse(beast::buffers_to_string(buffer_.data()));
+            handleTransaction(j);
+        }
+        catch (json::parse_error &e)
+        {
+            std::cerr << "JSON Parse Error: " << e.what() << '\n';
+        }
+
+        buffer_.consume(buffer_.size());
+        do_read();
+    }
+
+    void handleTransaction(const json &transactionData)
+    {
+        // Extract transaction details
+        std::string symbol = transactionData["symbol"];
+        int quantity = transactionData["quantity"];
+        bool isBuy = transactionData["isBuy"];
+
+        // Prepare the JSON payload for the HTTP POST request
+        json postJson = {{"symbol", symbol}, {"quantity", quantity}, {"isBuy", isBuy}};
+
+        // Send HTTP request
+        sendHttpRequest(postJson.dump());
+    }
+
+    void sendHttpRequest(const std::string &postData)
+    {
+        CURL *curl = curl_easy_init();
+        if (curl)
+        {
+            curl_easy_setopt(curl, CURLOPT_URL, "http://localhost:8080/transaction");
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postData.c_str());
+
+            // Perform the request
+            CURLcode res = curl_easy_perform(curl);
+
+            // Check for errors
+            if (res != CURLE_OK)
+                fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+
+            // Always cleanup
+            curl_easy_cleanup(curl);
+        }
     }
 
     void on_write(beast::error_code ec, std::size_t bytes_transferred)
